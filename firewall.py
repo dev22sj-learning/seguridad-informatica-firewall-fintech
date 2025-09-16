@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Firewall para FinTech Secure
+Firewall REAL para FinTech Secure
 Implementa filtrado de tráfico y bloqueo de sitios no autorizados
 """
 
@@ -10,6 +10,8 @@ import os
 import sys
 import datetime
 import logging
+import subprocess
+import time
 from typing import List, Set
 
 # Configuración de logging
@@ -40,9 +42,6 @@ class Firewall:
             # Crear archivo por defecto con sitios bloqueados
             default_sites = [
                 "facebook.com", "instagram.com", "tiktok.com",
-                "youtube.com", "netflix.com", "twitch.tv",
-                "reddit.com", "thepiratebay.org", "1337x.to",
-                "gmail.com", "outlook.com", "yahoo.com"
             ]
             with open('blocked_sites.txt', 'w') as f:
                 for site in default_sites:
@@ -95,34 +94,163 @@ class Firewall:
                 return True
         return False
     
+    def setup_iptables_rules(self):
+        """Configura reglas de iptables para bloquear tráfico REAL"""
+        try:
+            # Limpiar reglas existentes
+            subprocess.run(['sudo', 'iptables', '-F'], check=True)
+            subprocess.run(['sudo', 'iptables', '-X'], check=True)
+            
+            # Permitir tráfico local
+            subprocess.run(['sudo', 'iptables', '-A', 'INPUT', '-i', 'lo', '-j', 'ACCEPT'], check=True)
+            subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-o', 'lo', '-j', 'ACCEPT'], check=True)
+            
+            # Permitir IPs de redes autorizadas
+            for network in self.allowed_ips:
+                subprocess.run(['sudo', 'iptables', '-A', 'INPUT', '-s', network, '-j', 'ACCEPT'], check=True)
+                subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-d', network, '-j', 'ACCEPT'], check=True)
+            
+            # Bloquear sitios específicos usando iptables
+            for site in self.blocked_sites:
+                # Bloquear por nombre de dominio (usando el módulo string de iptables)
+                subprocess.run([
+                    'sudo', 'iptables', '-A', 'OUTPUT', 
+                    '-p', 'tcp', '--dport', '80',
+                    '-m', 'string', '--string', site, '--algo', 'bm',
+                    '-j', 'DROP'
+                ], check=True)
+                
+                subprocess.run([
+                    'sudo', 'iptables', '-A', 'OUTPUT', 
+                    '-p', 'tcp', '--dport', '443',
+                    '-m', 'string', '--string', site, '--algo', 'bm',
+                    '-j', 'DROP'
+                ], check=True)
+                
+                # También bloquear por IP (resolver DNS)
+                try:
+                    result = subprocess.run(['dig', '+short', site], 
+                                          capture_output=True, text=True, check=True)
+                    ips = result.stdout.strip().split('\n')
+                    for ip in ips:
+                        if ip and not ip.startswith(';'):
+                            subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-d', ip, '-j', 'DROP'], check=True)
+                            self.logger.info(f"Bloqueada IP: {ip} para {site}")
+                except:
+                    self.logger.warning(f"No se pudo resolver IP para {site}")
+            
+            # Política por defecto: permitir todo (o denegar para ser más restrictivo)
+            subprocess.run(['sudo', 'iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
+            subprocess.run(['sudo', 'iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
+            subprocess.run(['sudo', 'iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
+            
+            self.logger.info("Reglas de iptables configuradas correctamente")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error configurando iptables: {e}")
+            return False
+    
+    def block_with_hosts_file(self):
+        """Método alternativo: bloquear sitios usando el archivo hosts"""
+        hosts_path = "/etc/hosts" if os.name != "nt" else r"C:\Windows\System32\drivers\etc\hosts"
+        
+        try:
+            # Hacer backup del archivo hosts
+            if os.path.exists(hosts_path):
+                with open(hosts_path, 'r') as f:
+                    original_content = f.read()
+                
+                with open(hosts_path + '.backup', 'w') as f:
+                    f.write(original_content)
+            
+            # Agregar bloqueos al archivo hosts
+            with open(hosts_path, 'a') as f:
+                f.write('\n# === BLOQUEOS FINETECH SECURE ===\n')
+                for site in self.blocked_sites:
+                    f.write(f'127.0.0.1 {site}\n')
+                    f.write(f'127.0.0.1 www.{site}\n')
+                    f.write(f'::1 {site}\n')
+                    f.write(f'::1 www.{site}\n')
+            
+            self.logger.info("Sitios bloqueados en archivo hosts")
+            return True
+            
+        except PermissionError:
+            self.logger.error("Permisos insuficientes para modificar el archivo hosts")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error modificando archivo hosts: {e}")
+            return False
+    
     def monitor_traffic(self):
-        """Monitorea el tráfico de red (ejemplo simplificado)"""
+        """Monitorea el tráfico de red y aplica reglas de firewall"""
         self.logger.info("Iniciando monitoreo de tráfico")
         
-        # En una implementación real, aquí se usarían técnicas más avanzadas
-        # como sockets raw o librerías especializadas (Scapy, etc.)
+        # Configurar reglas de firewall
+        if os.name == "posix":  # Linux/macOS
+            success = self.setup_iptables_rules()
+            if not success:
+                print("Usando método alternativo (archivo hosts)...")
+                success = self.block_with_hosts_file()
+        else:  # Windows
+            success = self.block_with_hosts_file()
+        
+        if not success:
+            print("Error: No se pudieron configurar las reglas de firewall")
+            self.logger.error("No se pudieron configurar las reglas de firewall")
+            return
         
         print("Firewall activo. Monitoreando tráfico...")
+        print("Sitios bloqueados:", ", ".join(self.blocked_sites))
         print("Presiona Ctrl+C para detener")
         
         try:
             while True:
-                # Simulación de monitoreo
-                # En producción, esto se reemplazaría con captura real de paquetes
-                pass
+                # Monitoreo continuo - en una implementación real aquí
+                # se podrían agregar más funcionalidades de monitoreo
+                time.sleep(5)
+                # Verificar periódicamente si las reglas siguen activas
                 
         except KeyboardInterrupt:
+            self.cleanup()
             self.logger.info("Firewall detenido por el usuario")
             print("\nFirewall detenido")
+    
+    def cleanup(self):
+        """Limpia las reglas de firewall al detener"""
+        try:
+            if os.name == "posix":
+                # Limpiar reglas iptables
+                subprocess.run(['sudo', 'iptables', '-F'], check=True)
+                subprocess.run(['sudo', 'iptables', '-X'], check=True)
+                print("Reglas de iptables limpiadas")
+            
+            # Restaurar archivo hosts si se usó ese método
+            hosts_path = "/etc/hosts" if os.name != "nt" else r"C:\Windows\System32\drivers\etc\hosts"
+            backup_path = hosts_path + '.backup'
+            
+            if os.path.exists(backup_path):
+                with open(backup_path, 'r') as f:
+                    original_content = f.read()
+                
+                with open(hosts_path, 'w') as f:
+                    f.write(original_content)
+                
+                os.remove(backup_path)
+                print("Archivo hosts restaurado")
+                
+        except Exception as e:
+            self.logger.error(f"Error en cleanup: {e}")
 
 def main():
     """Función principal"""
-    print("=== Firewall FinTech Secure ===")
+    print("=== Firewall Real FinTech Secure ===")
     print("Inicializando firewall...")
     
     # Verificar permisos de administrador
     if os.name != 'nt' and os.geteuid() != 0:
-        print("Error: Este script requiere privilegios de administrador")
+        print("Error: Este script requiere privilegios de administrador (ejecuta con sudo)")
         sys.exit(1)
     
     firewall = Firewall()
@@ -143,7 +271,7 @@ def main():
         status = "BLOQUEADO" if firewall.is_site_blocked(site) else "PERMITIDO"
         print(f"Sitio {site}: {status}")
     
-    # Iniciar monitoreo (en implementación real)
+    # Iniciar monitoreo REAL
     firewall.monitor_traffic()
 
 if __name__ == "__main__":
