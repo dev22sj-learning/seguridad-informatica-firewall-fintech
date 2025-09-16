@@ -144,7 +144,7 @@ def main():
         print(f"Sitio {site}: {status}")
     
     # Iniciar monitoreo (en implementación real)
-    # firewall.monitor_traffic()
+    firewall.monitor_traffic()
 
 if __name__ == "__main__":
     main()
