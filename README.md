@@ -11,5 +11,5 @@ En la raíz del proyecto
 
 ```bash
 # Ejecutar con permisos de administrador
-$ sudo python firewall.py
+$ sudo python3 firewall.py
 ```
