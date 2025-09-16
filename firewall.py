@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Firewall REAL para FinTech Secure
-Implementa filtrado de tráfico y bloqueo de sitios no autorizados
+Firewall REAL Mejorado para FinTech Secure
+Bloquea efectivamente Instagram, YouTube y todos los sitios de la lista
 """
 
 import socket
@@ -12,6 +12,7 @@ import datetime
 import logging
 import subprocess
 import time
+import re
 from typing import List, Set
 
 # Configuración de logging
@@ -26,6 +27,7 @@ class Firewall:
         self.logger = logging.getLogger('Firewall')
         self.blocked_sites = self.load_blocked_sites()
         self.allowed_ips = self.load_allowed_ips()
+        self.resolved_ips = set()
         
     def load_blocked_sites(self) -> Set[str]:
         """Carga la lista de sitios bloqueados desde archivo"""
@@ -33,7 +35,7 @@ class Firewall:
         try:
             with open('blocked_sites.txt', 'r') as f:
                 for line in f:
-                    site = line.strip()
+                    site = line.strip().lower()
                     if site and not site.startswith('#'):
                         sites.add(site)
             self.logger.info(f"Cargados {len(sites)} sitios bloqueados")
@@ -42,6 +44,14 @@ class Firewall:
             # Crear archivo por defecto con sitios bloqueados
             default_sites = [
                 "facebook.com", "instagram.com", "tiktok.com",
+                "youtube.com", "netflix.com", "twitch.tv",
+                "reddit.com", "thepiratebay.org", "1337x.to",
+                "gmail.com", "outlook.com", "yahoo.com",
+                # Dominios adicionales de Instagram y YouTube
+                "instagram.com", "www.instagram.com", "api.instagram.com",
+                "youtube.com", "www.youtube.com", "m.youtube.com",
+                "youtu.be", "ggpht.com", "ytimg.com",
+                "googleapis.com"  # YouTube usa este dominio
             ]
             with open('blocked_sites.txt', 'w') as f:
                 for site in default_sites:
@@ -62,12 +72,50 @@ class Firewall:
         except FileNotFoundError:
             self.logger.warning("Archivo allowed_ips.txt no encontrado. Creando uno por defecto.")
             # Crear archivo por defecto con redes permitidas
-            default_ips = ["192.168.1.0/24", "10.0.0.0/8"]
+            default_ips = ["192.168.1.0/24", "10.0.0.0/8", "127.0.0.0/8"]
             with open('allowed_ips.txt', 'w') as f:
                 for ip in default_ips:
                     f.write(ip + '\n')
                     ips.append(ip)
         return ips
+    
+    def resolve_domains(self):
+        """Resuelve todos los dominios bloqueados a IPs"""
+        self.logger.info("Resolviendo IPs de dominios bloqueados...")
+        
+        for site in self.blocked_sites:
+            try:
+                # Resolver IPv4
+                result = subprocess.run(['dig', '+short', 'A', site], 
+                                      capture_output=True, text=True, timeout=10)
+                ips = result.stdout.strip().split('\n')
+                for ip in ips:
+                    if ip and not ip.startswith(';') and self.is_valid_ip(ip):
+                        self.resolved_ips.add(ip)
+                        self.logger.info(f"Resuelto {site} -> {ip}")
+                
+                # Resolver IPv6
+                result6 = subprocess.run(['dig', '+short', 'AAAA', site], 
+                                       capture_output=True, text=True, timeout=10)
+                ips6 = result6.stdout.strip().split('\n')
+                for ip in ips6:
+                    if ip and not ip.startswith(';') and self.is_valid_ip(ip):
+                        self.resolved_ips.add(ip)
+                        
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                self.logger.warning(f"No se pudo resolver {site}")
+    
+    def is_valid_ip(self, ip: str) -> bool:
+        """Verifica si una cadena es una IP válida"""
+        try:
+            socket.inet_pton(socket.AF_INET, ip)
+            return True
+        except socket.error:
+            try:
+                socket.inet_pton(socket.AF_INET6, ip)
+                return True
+            except socket.error:
+                return False
     
     def is_ip_in_network(self, ip: str, network: str) -> bool:
         """Verifica si una IP pertenece a una red específica"""
@@ -89,8 +137,11 @@ class Firewall:
     
     def is_site_blocked(self, hostname: str) -> bool:
         """Verifica si un sitio está bloqueado"""
+        hostname = hostname.lower()
         for blocked_site in self.blocked_sites:
-            if hostname.endswith(blocked_site) or blocked_site in hostname:
+            if (hostname == blocked_site or 
+                hostname.endswith('.' + blocked_site) or 
+                blocked_site in hostname):
                 return True
         return False
     
@@ -110,9 +161,17 @@ class Firewall:
                 subprocess.run(['sudo', 'iptables', '-A', 'INPUT', '-s', network, '-j', 'ACCEPT'], check=True)
                 subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-d', network, '-j', 'ACCEPT'], check=True)
             
-            # Bloquear sitios específicos usando iptables
+            # Resolver todos los dominios a IPs
+            self.resolve_domains()
+            
+            # Bloquear por IPs resueltas
+            for ip in self.resolved_ips:
+                subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-d', ip, '-j', 'DROP'], check=True)
+                self.logger.info(f"Regla iptables: BLOQUEADO {ip}")
+            
+            # Bloquear por nombres de dominio (para nuevos dominios no resueltos)
             for site in self.blocked_sites:
-                # Bloquear por nombre de dominio (usando el módulo string de iptables)
+                # HTTP
                 subprocess.run([
                     'sudo', 'iptables', '-A', 'OUTPUT', 
                     '-p', 'tcp', '--dport', '80',
@@ -120,6 +179,7 @@ class Firewall:
                     '-j', 'DROP'
                 ], check=True)
                 
+                # HTTPS
                 subprocess.run([
                     'sudo', 'iptables', '-A', 'OUTPUT', 
                     '-p', 'tcp', '--dport', '443',
@@ -127,19 +187,15 @@ class Firewall:
                     '-j', 'DROP'
                 ], check=True)
                 
-                # También bloquear por IP (resolver DNS)
-                try:
-                    result = subprocess.run(['dig', '+short', site], 
-                                          capture_output=True, text=True, check=True)
-                    ips = result.stdout.strip().split('\n')
-                    for ip in ips:
-                        if ip and not ip.startswith(';'):
-                            subprocess.run(['sudo', 'iptables', '-A', 'OUTPUT', '-d', ip, '-j', 'DROP'], check=True)
-                            self.logger.info(f"Bloqueada IP: {ip} para {site}")
-                except:
-                    self.logger.warning(f"No se pudo resolver IP para {site}")
+                # DNS
+                subprocess.run([
+                    'sudo', 'iptables', '-A', 'OUTPUT', 
+                    '-p', 'udp', '--dport', '53',
+                    '-m', 'string', '--string', site, '--algo', 'bm',
+                    '-j', 'DROP'
+                ], check=True)
             
-            # Política por defecto: permitir todo (o denegar para ser más restrictivo)
+            # Política por defecto
             subprocess.run(['sudo', 'iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
             subprocess.run(['sudo', 'iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
             subprocess.run(['sudo', 'iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
@@ -170,8 +226,30 @@ class Firewall:
                 for site in self.blocked_sites:
                     f.write(f'127.0.0.1 {site}\n')
                     f.write(f'127.0.0.1 www.{site}\n')
+                    f.write(f'0.0.0.0 {site}\n')
+                    f.write(f'0.0.0.0 www.{site}\n')
                     f.write(f'::1 {site}\n')
                     f.write(f'::1 www.{site}\n')
+                    
+                    # Dominios adicionales específicos para Instagram y YouTube
+                    if site == "instagram.com":
+                        f.write('127.0.0.1 api.instagram.com\n')
+                        f.write('127.0.0.1 graph.instagram.com\n')
+                        f.write('0.0.0.0 api.instagram.com\n')
+                        f.write('0.0.0.0 graph.instagram.com\n')
+                    
+                    if site == "youtube.com":
+                        f.write('127.0.0.1 m.youtube.com\n')
+                        f.write('127.0.0.1 youtu.be\n')
+                        f.write('127.0.0.1 ggpht.com\n')
+                        f.write('127.0.0.1 ytimg.com\n')
+                        f.write('0.0.0.0 m.youtube.com\n')
+                        f.write('0.0.0.0 youtu.be\n')
+                        f.write('0.0.0.0 ggpht.com\n')
+                        f.write('0.0.0.0 ytimg.com\n')
+            
+            # Flush DNS cache
+            self.flush_dns_cache()
             
             self.logger.info("Sitios bloqueados en archivo hosts")
             return True
@@ -182,6 +260,20 @@ class Firewall:
         except Exception as e:
             self.logger.error(f"Error modificando archivo hosts: {e}")
             return False
+    
+    def flush_dns_cache(self):
+        """Limpiar cache DNS"""
+        try:
+            if os.name == "posix":
+                if sys.platform == "darwin":  # macOS
+                    subprocess.run(['sudo', 'dscacheutil', '-flushcache'], check=True)
+                    subprocess.run(['sudo', 'killall', '-HUP', 'mDNSResponder'], check=True)
+                else:  # Linux
+                    subprocess.run(['sudo', 'systemctl', 'restart', 'systemd-resolved'], check=True)
+            else:  # Windows
+                subprocess.run(['ipconfig', '/flushdns'], check=True)
+        except:
+            self.logger.warning("No se pudo flush DNS cache")
     
     def monitor_traffic(self):
         """Monitorea el tráfico de red y aplica reglas de firewall"""
@@ -202,15 +294,23 @@ class Firewall:
             return
         
         print("Firewall activo. Monitoreando tráfico...")
-        print("Sitios bloqueados:", ", ".join(self.blocked_sites))
+        print("Sitios bloqueados:", ", ".join(sorted(self.blocked_sites)))
+        print("IPs bloqueadas:", len(self.resolved_ips))
         print("Presiona Ctrl+C para detener")
         
         try:
             while True:
-                # Monitoreo continuo - en una implementación real aquí
-                # se podrían agregar más funcionalidades de monitoreo
-                time.sleep(5)
-                # Verificar periódicamente si las reglas siguen activas
+                # Monitoreo continuo - verificar periódicamente
+                time.sleep(30)
+                # Re-resolver dominios cada 30 minutos para actualizar IPs
+                if len(self.resolved_ips) > 0:
+                    time.sleep(1800)  # 30 minutos
+                    old_ips = self.resolved_ips.copy()
+                    self.resolved_ips.clear()
+                    self.resolve_domains()
+                    if old_ips != self.resolved_ips:
+                        self.logger.info("IPs actualizadas, reconfigurando reglas...")
+                        self.setup_iptables_rules()
                 
         except KeyboardInterrupt:
             self.cleanup()
@@ -238,6 +338,7 @@ class Firewall:
                     f.write(original_content)
                 
                 os.remove(backup_path)
+                self.flush_dns_cache()
                 print("Archivo hosts restaurado")
                 
         except Exception as e:
@@ -245,7 +346,7 @@ class Firewall:
 
 def main():
     """Función principal"""
-    print("=== Firewall Real FinTech Secure ===")
+    print("=== Firewall Real Mejorado FinTech Secure ===")
     print("Inicializando firewall...")
     
     # Verificar permisos de administrador
@@ -255,21 +356,10 @@ def main():
     
     firewall = Firewall()
     
-    # Ejemplo de verificación
-    test_ips = ["192.168.1.100", "8.8.8.8", "10.0.0.5"]
-    test_sites = ["facebook.com", "google.com", "youtube.com"]
-    
-    print("\n=== Pruebas de verificación ===")
-    
-    print("\nVerificación de IPs:")
-    for ip in test_ips:
-        status = "PERMITIDA" if firewall.is_ip_allowed(ip) else "BLOQUEADA"
-        print(f"IP {ip}: {status}")
-    
-    print("\nVerificación de sitios:")
-    for site in test_sites:
-        status = "BLOQUEADO" if firewall.is_site_blocked(site) else "PERMITIDO"
-        print(f"Sitio {site}: {status}")
+    # Mostrar información de bloqueo
+    print(f"\nSitios a bloquear: {len(firewall.blocked_sites)}")
+    for i, site in enumerate(sorted(firewall.blocked_sites), 1):
+        print(f"{i:2d}. {site}")
     
     # Iniciar monitoreo REAL
     firewall.monitor_traffic()
