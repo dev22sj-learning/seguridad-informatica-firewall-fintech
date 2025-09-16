@@ -21,9 +21,9 @@ logging.basicConfig(
 
 class Firewall:
     def __init__(self):
+        self.logger = logging.getLogger('Firewall')
         self.blocked_sites = self.load_blocked_sites()
         self.allowed_ips = self.load_allowed_ips()
-        self.logger = logging.getLogger('Firewall')
         
     def load_blocked_sites(self) -> Set[str]:
         """Carga la lista de sitios bloqueados desde archivo"""
